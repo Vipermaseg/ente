@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	b64 "encoding/base64"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -92,6 +93,10 @@ import (
 )
 
 func main() {
+	var runJob string
+	flag.StringVar(&runJob, "run", "", "Run a specific cron job and exit")
+	flag.Parse()
+
 	environment := os.Getenv("ENVIRONMENT")
 	if environment == "" {
 		environment = "local"
@@ -1010,6 +1015,16 @@ func main() {
 	adminAPI.POST("/discount/add-coupons", discountCouponHandler.AddCoupons)
 
 	setKnownAPIs(server.Routes())
+
+	// If --run flag is set, execute the specified job and exit immediately.
+	if runJob != "" {
+		runCronJob(runJob, fileController, objectController, embeddingController,
+			trashController, dataCleanupController)
+		log.Infof("Job '%s' completed, exiting.", runJob)
+		db.Close()
+		os.Exit(0)
+	}
+
 	setupAndStartBackgroundJobs(objectCleanupController, replicationController3, fileDataCtrl, contactController)
 	setupAndStartCrons(
 		userAuthRepo, collectionLinkRepo, fileLinkRepo, pasteRepo, twoFactorRepo, passkeysRepo, fileController, taskLockingRepo, emailNotificationCtrl,
@@ -1374,4 +1389,44 @@ func schedule(c *cron.Cron, spec string, cmd func()) (cron.EntryID, error) {
 func scheduleAndRun(c *cron.Cron, spec string, cmd func()) (cron.EntryID, error) {
 	go cmd()
 	return schedule(c, spec, cmd)
+}
+
+// runCronJob dispatches a single cron operation by name, used with --run flag.
+func runCronJob(
+	jobName string,
+	fileCtrl *controller.FileController,
+	objectCtrl *controller.ObjectController,
+	embeddingCtrl *embeddingCtrl.Controller,
+	trashCtrl *controller.TrashController,
+	dataCleanupCtrl *dataCleanupCtrl.DeleteUserCleanupController,
+) {
+	switch jobName {
+	case "migrate":
+		// No-op. initDB() (called early in main, before this dispatch
+		// runs) applies any pending golang-migrate migrations as a
+		// side effect of starting up. Reaching this case means
+		// migrations completed cleanly and the DB connection is
+		// healthy — we just want to exit so the caller (a Cloud Run
+		// migrate job) records "succeeded". Decoupling migrations
+		// from API/cron startup is the whole point of this case.
+		log.Info("museum: migrations applied")
+	case "cleanup-deleted-files":
+		fileCtrl.CleanupDeletedFiles()
+	case "remove-compliance-holds":
+		objectCtrl.RemoveComplianceHolds()
+	case "cleanup-deleted-embeddings":
+		embeddingCtrl.CleanupDeletedEmbeddings()
+	case "drop-file-metadata":
+		trashCtrl.DropFileMetadataCron()
+	case "delete-data":
+		dataCleanupCtrl.DeleteDataCron()
+	case "process-empty-trash":
+		trashCtrl.ProcessEmptyTrashRequests()
+	case "delete-aged-trash":
+		trashCtrl.DeleteAgedTrashedFiles()
+	case "cleanup-trashed-collections":
+		trashCtrl.CleanupTrashedCollections()
+	default:
+		log.Fatalf("Unknown job: %s. Valid options: migrate, cleanup-deleted-files, remove-compliance-holds, cleanup-deleted-embeddings, drop-file-metadata, delete-data, process-empty-trash, delete-aged-trash, cleanup-trashed-collections", jobName)
+	}
 }
