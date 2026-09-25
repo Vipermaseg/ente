@@ -1228,7 +1228,14 @@ func setupDatabase() *sql.DB {
 
 	db.SetMaxIdleConns(30)
 	db.SetMaxOpenConns(60)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	// Keep every pooled conn younger than the DB's idle-suspend window (Neon
+	// free plan: 5 min): a conn created <4 min ago means the DB was awake <4
+	// min ago, so it can't have been killed by suspend. A killed conn fails
+	// its next write under TLS with a cached error lib/pq doesn't mark bad,
+	// so database/sql would keep handing it out. Lifetime (not idle time) is
+	// used because it's checked on checkout; the idle reaper is a timer that
+	// stalls while Cloud Run throttles CPU between requests.
+	db.SetConnMaxLifetime(4 * time.Minute)
 	db.SetConnMaxIdleTime(10 * time.Minute)
 
 	log.Println("Database was configured successfully.")
@@ -1253,7 +1260,8 @@ func setupLatencySensitiveDatabase() *sql.DB {
 
 	db.SetMaxIdleConns(50)
 	db.SetMaxOpenConns(100)
-	db.SetConnMaxLifetime(30 * time.Minute)
+	// See setupDatabase for why this is below 5 min.
+	db.SetConnMaxLifetime(4 * time.Minute)
 	db.SetConnMaxIdleTime(10 * time.Minute)
 
 	log.Println("Latency sensitive database was configured successfully.")
